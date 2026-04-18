@@ -1,48 +1,55 @@
 # bot.py
-# pip install python-telegram-bot motor pymongo
+# pip install python-telegram-bot asyncpg
 
 import os
 import re
 import asyncio
+import asyncpg
 from datetime import datetime, timedelta
 from collections import defaultdict
 from telegram import Update, BotCommand
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from motor.motor_asyncio import AsyncIOMotorClient
 from dotenv import load_dotenv
 
-# .env faylini yuklash (faqat lokal test uchun)
 load_dotenv()
 
 # ==================== SOZLAMALAR ====================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8321131397:AAH1LgiIB1nmMNY_BBLhp5sKOE_blYsPfWk")
-MONGO_URL = os.getenv("MONGO_URL", "mongodb+srv://abdugaffarov0111_db_user:IHMeT5ndFpUSKUsC@freshxato.ovxk4z9.mongodb.net/?appName=freshxato")
+DATABASE_URL = os.getenv("DATABASE_URL")
 
-# MongoDB ulanish
-client = AsyncIOMotorClient(MONGO_URL)
-db = client.get_database("freshxato")
-collection = db.get_collection("xatolar")
+# Pool obyekti (api/index.py dan o'rnatiladi)
+db_pool = None
+
+async def get_pool():
+    global db_pool
+    if db_pool is None:
+        db_pool = await asyncpg.create_pool(DATABASE_URL, ssl="require")
+    return db_pool
 
 # ==================== MA'LUMOTLAR BILAN ISHLASH ====================
 
 async def get_all_xatolar():
-    cursor = collection.find({})
-    return await cursor.to_list(length=None)
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT ism, sana, qoshilgan FROM xatolar")
+        return [dict(r) for r in rows]
 
 async def add_xato(ism, sana):
-    doc = {
-        "ism": ism.capitalize(),
-        "sana": sana,
-        "qoshilgan": datetime.now().isoformat()
-    }
-    await collection.insert_one(doc)
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO xatolar (ism, sana) VALUES ($1, $2)",
+            ism.capitalize(), sana
+        )
 
 async def delete_last_xato():
-    # Oxirgi qo'shilganini topib o'chirish
-    last = await collection.find_one(sort=[("qoshilgan", -1)])
-    if last:
-        await collection.delete_one({"_id": last["_id"]})
-        return last
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        # Oxirgi qo'shilganini topib o'chirish
+        row = await conn.fetchrow("SELECT id, ism, sana FROM xatolar ORDER BY qoshilgan DESC LIMIT 1")
+        if row:
+            await conn.execute("DELETE FROM xatolar WHERE id = $1", row['id'])
+            return dict(row)
     return None
 
 # ==================== HISOBOT LOGIKASI ====================
@@ -61,9 +68,10 @@ async def hisobot_yaratish(davr="hafta"):
         bosh = endi.replace(hour=0, minute=0, second=0)
         nom = "BUGUNGI"
 
+    # PostgreSQL da sana 'date' obyektidir
     filtered = [
         x for x in xatolar
-        if datetime.strptime(x["sana"], "%Y-%m-%d") >= bosh
+        if (x["sana"] if isinstance(x["sana"], datetime) else datetime.combine(x["sana"], datetime.min.time())) >= bosh
     ]
 
     if not filtered:
@@ -71,8 +79,9 @@ async def hisobot_yaratish(davr="hafta"):
 
     stat = defaultdict(lambda: {"jami": 0, "kunlar": defaultdict(int)})
     for x in filtered:
+        sana_str = x["sana"].strftime("%Y-%m-%d") if not isinstance(x["sana"], str) else x["sana"]
         stat[x["ism"]]["jami"] += 1
-        stat[x["ism"]]["kunlar"][x["sana"]] += 1
+        stat[x["ism"]]["kunlar"][sana_str] += 1
 
     matn = f"📊 *{nom} HISOBOT*\n"
     matn += f"📅 {bosh.strftime('%d.%m.%Y')} — {endi.strftime('%d.%m.%Y')}\n"
@@ -84,7 +93,8 @@ async def hisobot_yaratish(davr="hafta"):
         emoji = "🔴" if s["jami"] >= 5 else "🟡" if s["jami"] >= 3 else "🟢"
         matn += f"{emoji} *{ism}* — {s['jami']} ta xato\n"
         for kun in sorted(s["kunlar"]):
-            kun_fmt = datetime.strptime(kun, "%Y-%m-%d").strftime("%d.%m.%Y")
+            # kun allaqachon string yoki date
+            kun_fmt = datetime.strptime(kun, "%Y-%m-%d").strftime("%d.%m.%Y") if isinstance(kun, str) else kun.strftime("%d.%m.%Y")
             matn += f"   📍 {kun_fmt}: {s['kunlar'][kun]} ta\n"
         matn += "\n"
 
@@ -100,14 +110,14 @@ async def xodim_stat(ism):
     if not mine:
         return f"❌ *{ism}* bo'yicha yozuv topilmadi."
 
-    bugun_str = endi.strftime("%Y-%m-%d")
+    bugun_str = endi.date()
     bugun = sum(1 for x in mine if x["sana"] == bugun_str)
     
-    hafta_bosh = endi - timedelta(days=7)
-    hafta = sum(1 for x in mine if datetime.strptime(x["sana"], "%Y-%m-%d") >= hafta_bosh)
+    hafta_bosh = endi.date() - timedelta(days=7)
+    hafta = sum(1 for x in mine if x["sana"] >= hafta_bosh)
     
-    oy_bosh = endi.replace(day=1)
-    oy = sum(1 for x in mine if datetime.strptime(x["sana"], "%Y-%m-%d") >= oy_bosh)
+    oy_bosh = endi.date().replace(day=1)
+    oy = sum(1 for x in mine if x["sana"] >= oy_bosh)
     
     jami = len(mine)
 
@@ -120,7 +130,7 @@ async def xodim_stat(ism):
     matn += "📋 *So'nggi yozuvlar:*\n"
 
     for x in sorted(mine, key=lambda x: x["qoshilgan"], reverse=True)[:5]:
-        kun_fmt = datetime.strptime(x["sana"], "%Y-%m-%d").strftime("%d.%m.%Y")
+        kun_fmt = x["sana"].strftime("%d.%m.%Y")
         matn += f"  • {kun_fmt}: 1 ta\n"
 
     return matn
@@ -177,7 +187,7 @@ async def ochir_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not oxirgi:
         await javob_yuborish(update, "O'chiriladigan yozuv yo'q.")
         return
-    kun_fmt = datetime.strptime(oxirgi["sana"], "%Y-%m-%d").strftime("%d.%m.%Y")
+    kun_fmt = oxirgi["sana"].strftime("%d.%m.%Y")
     await javob_yuborish(update, f"🗑 O'chirildi:\n👤 {oxirgi['ism']} | 📅 {kun_fmt}")
 
 
@@ -203,7 +213,6 @@ async def xabar_qabul(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     matn = message.text
 
-    # /buyruq bo'lsa
     if matn.startswith("/"):
         buyruq = matn.split()[0].replace("/", "").split("@")[0].lower()
         args = matn.split()[1:] if len(matn.split()) > 1 else []
@@ -218,12 +227,11 @@ async def xabar_qabul(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif buyruq == "start": await start(update, context)
         return
 
-    # #ism larni topish
     teglar = re.findall(r'#([a-zA-Z\u0400-\u04FFa-zA-Z]+)', matn)
     if not teglar:
         return
 
-    bugun = datetime.now().strftime("%Y-%m-%d")
+    bugun = datetime.now().date()
     bugun_fmt = datetime.now().strftime("%d.%m.%Y")
     qoshilganlar = []
 
@@ -231,14 +239,12 @@ async def xabar_qabul(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ism = teg.capitalize()
         await add_xato(ism, bugun)
 
-        # Statistika uchun qayta o'qish (yoki keshdan olish)
-        # Soddaroq bo'lishi uchun db dan filtrlaymiz
         xatolar = await get_all_xatolar()
         mine = [x for x in xatolar if x["ism"] == ism]
         
         b_jami = sum(1 for x in mine if x["sana"] == bugun)
-        h_jami = sum(1 for x in mine if datetime.strptime(x["sana"], "%Y-%m-%d") >= datetime.now() - timedelta(days=7))
-        o_jami = sum(1 for x in mine if datetime.strptime(x["sana"], "%Y-%m-%d") >= datetime.now().replace(day=1))
+        h_jami = sum(1 for x in mine if x["sana"] >= datetime.now().date() - timedelta(days=7))
+        o_jami = sum(1 for x in mine if x["sana"] >= datetime.now().date().replace(day=1))
 
         qoshilganlar.append(
             f"👤 *{ism}*\n"
@@ -275,7 +281,6 @@ def setup_application(app: Application):
         ])
     app.post_init = set_cmds
 
-# Lokal polling uchun (ixtiyoriy)
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
     setup_application(app)
