@@ -1,0 +1,8 @@
+{
+  "rewrite": [{ "source": "/(.*)", "dest": "/api/index.py" }],
+  "functions": {
+    "api/index.py": {
+      "runtime": "vercel-python@3.0.8"
+    }
+  }
+}
