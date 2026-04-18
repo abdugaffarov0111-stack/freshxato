@@ -22,10 +22,14 @@ async def shutdown():
     await telegram_app.shutdown()
 
 @app.post("/api/index")
+@app.post("/")
 async def webhook(request: Request):
-    data = await request.json()
-    update = Update.de_json(data, telegram_app.bot)
-    await telegram_app.process_update(update)
+    try:
+        data = await request.json()
+        update = Update.de_json(data, telegram_app.bot)
+        await telegram_app.process_update(update)
+    except Exception as e:
+        print(f"Error: {e}")
     return {"ok": True}
 
 @app.get("/")
