@@ -1,10 +1,8 @@
-# bot.py
-# pip install python-telegram-bot asyncpg
-
 import os
 import re
 import asyncio
 import asyncpg
+import pytz
 from datetime import datetime, timedelta
 from collections import defaultdict
 from telegram import Update, BotCommand
@@ -14,6 +12,23 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ==================== SOZLAMALAR ====================
+TASHKENT_TZ = pytz.timezone("Asia/Tashkent")
+
+XATO_KODLARI = {
+    "x1": "DOGOVOR",
+    "x2": "KOMMENT",
+    "x3": "KONTRAGENT",
+    "x4": "NOMEKLATURA",
+    "x5": "KOLICHESTVO",
+    "x6": "PRIXOD",
+    "x7": "VOZVRAT",
+    "x8": "SPISANIYA",
+    "x9": "NAKLADNOY",
+    "x10": "SUMMA"
+}
+
+def get_now():
+    return datetime.now(TASHKENT_TZ)
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8321131397:AAH1LgiIB1nmMNY_BBLhp5sKOE_blYsPfWk")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
@@ -24,6 +39,12 @@ async def get_pool():
     global db_pool
     if db_pool is None:
         db_pool = await asyncpg.create_pool(DATABASE_URL, ssl="require")
+        # Schema update check
+        async with db_pool.acquire() as conn:
+            await conn.execute("""
+                ALTER TABLE xatolar 
+                ADD COLUMN IF NOT EXISTS xato_turi TEXT DEFAULT 'Umumiy xato';
+            """)
     return db_pool
 
 # ==================== MA'LUMOTLAR BILAN ISHLASH ====================
@@ -31,22 +52,22 @@ async def get_pool():
 async def get_all_xatolar():
     pool = await get_pool()
     async with pool.acquire() as conn:
-        rows = await conn.fetch("SELECT ism, sana, qoshilgan FROM xatolar")
+        rows = await conn.fetch("SELECT ism, sana, xato_turi, qoshilgan FROM xatolar")
         return [dict(r) for r in rows]
 
-async def add_xato(ism, sana):
+async def add_xato(ism, sana, xato_turi="Umumiy xato"):
     pool = await get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
-            "INSERT INTO xatolar (ism, sana) VALUES ($1, $2)",
-            ism.capitalize(), sana
+            "INSERT INTO xatolar (ism, sana, xato_turi) VALUES ($1, $2, $3)",
+            ism.capitalize(), sana, xato_turi
         )
 
 async def delete_last_xato():
     pool = await get_pool()
     async with pool.acquire() as conn:
         # Oxirgi qo'shilganini topib o'chirish
-        row = await conn.fetchrow("SELECT id, ism, sana FROM xatolar ORDER BY qoshilgan DESC LIMIT 1")
+        row = await conn.fetchrow("SELECT id, ism, sana, xato_turi FROM xatolar ORDER BY qoshilgan DESC LIMIT 1")
         if row:
             await conn.execute("DELETE FROM xatolar WHERE id = $1", row['id'])
             return dict(row)
@@ -56,32 +77,31 @@ async def delete_last_xato():
 
 async def hisobot_yaratish(davr="hafta"):
     xatolar = await get_all_xatolar()
-    endi = datetime.now()
+    endi = get_now()
 
     if davr == "hafta":
-        bosh = endi - timedelta(days=7)
+        bosh = (endi - timedelta(days=7)).replace(hour=0, minute=0, second=0, microsecond=0)
         nom = "HAFTALIK"
     elif davr == "oy":
-        bosh = endi.replace(day=1, hour=0, minute=0, second=0)
+        bosh = endi.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         nom = "OYLIK"
     else:
-        bosh = endi.replace(hour=0, minute=0, second=0)
+        bosh = endi.replace(hour=0, minute=0, second=0, microsecond=0)
         nom = "BUGUNGI"
 
-    # PostgreSQL da sana 'date' obyektidir
+    # PostgreSQL da x["sana"] date obyektidir
     filtered = [
         x for x in xatolar
-        if (x["sana"] if isinstance(x["sana"], datetime) else datetime.combine(x["sana"], datetime.min.time())) >= bosh
+        if datetime.combine(x["sana"] if not isinstance(x["sana"], datetime) else x["sana"].date(), datetime.min.time()).replace(tzinfo=TASHKENT_TZ) >= bosh
     ]
 
     if not filtered:
         return "📭 Bu davrda xato topilmadi."
 
-    stat = defaultdict(lambda: {"jami": 0, "kunlar": defaultdict(int)})
+    stat = defaultdict(lambda: {"jami": 0, "xatolar": defaultdict(int)})
     for x in filtered:
-        sana_str = x["sana"].strftime("%Y-%m-%d") if not isinstance(x["sana"], str) else x["sana"]
         stat[x["ism"]]["jami"] += 1
-        stat[x["ism"]]["kunlar"][sana_str] += 1
+        stat[x["ism"]]["xatolar"][x["xato_turi"]] += 1
 
     matn = f"📊 *{nom} HISOBOT*\n"
     matn += f"📅 {bosh.strftime('%d.%m.%Y')} — {endi.strftime('%d.%m.%Y')}\n"
@@ -91,11 +111,10 @@ async def hisobot_yaratish(davr="hafta"):
 
     for ism, s in sorted(stat.items(), key=lambda x: -x[1]["jami"]):
         emoji = "🔴" if s["jami"] >= 5 else "🟡" if s["jami"] >= 3 else "🟢"
-        matn += f"{emoji} *{ism}* — {s['jami']} ta xato\n"
-        for kun in sorted(s["kunlar"]):
-            # kun allaqachon string yoki date
-            kun_fmt = datetime.strptime(kun, "%Y-%m-%d").strftime("%d.%m.%Y") if isinstance(kun, str) else kun.strftime("%d.%m.%Y")
-            matn += f"   📍 {kun_fmt}: {s['kunlar'][kun]} ta\n"
+        ball = round(s["jami"] * 0.2, 1)
+        matn += f"{emoji} *{ism}* — {s['jami']} ta xato (*{ball} ball*)\n"
+        for xato, soni in sorted(s["xatolar"].items(), key=lambda x: -x[1]):
+            matn += f"   • {xato}: {soni} ta\n"
         matn += "\n"
 
     matn += "━━━━━━━━━━━━━━━━━━━━\n✅ Hisobot tayyor"
@@ -104,34 +123,34 @@ async def hisobot_yaratish(davr="hafta"):
 
 async def xodim_stat(ism):
     xatolar = await get_all_xatolar()
-    endi = datetime.now()
+    endi = get_now().date()
 
     mine = [x for x in xatolar if x["ism"].lower() == ism.lower()]
     if not mine:
         return f"❌ *{ism}* bo'yicha yozuv topilmadi."
 
-    bugun_str = endi.date()
-    bugun = sum(1 for x in mine if x["sana"] == bugun_str)
+    bugun = sum(1 for x in mine if x["sana"] == endi)
     
-    hafta_bosh = endi.date() - timedelta(days=7)
+    hafta_bosh = endi - timedelta(days=7)
     hafta = sum(1 for x in mine if x["sana"] >= hafta_bosh)
     
-    oy_bosh = endi.date().replace(day=1)
+    oy_bosh = endi.replace(day=1)
     oy = sum(1 for x in mine if x["sana"] >= oy_bosh)
     
     jami = len(mine)
+    jami_ball = round(jami * 0.2, 1)
 
     matn = f"👤 *{ism.capitalize()}* statistikasi\n"
     matn += "━━━━━━━━━━━━━━━━━━━━\n"
     matn += f"📅 Bugun:    *{bugun} ta*\n"
     matn += f"📆 Bu hafta: *{hafta} ta*\n"
     matn += f"🗓 Bu oy:    *{oy} ta*\n"
-    matn += f"📊 Jami:     *{jami} ta*\n\n"
+    matn += f"📊 Jami:     *{jami} ta* (*{jami_ball} ball*)\n\n"
     matn += "📋 *So'nggi yozuvlar:*\n"
 
-    for x in sorted(mine, key=lambda x: x["qoshilgan"], reverse=True)[:5]:
+    for x in sorted(mine, key=lambda x: x["qoshilgan"], reverse=True)[:10]:
         kun_fmt = x["sana"].strftime("%d.%m.%Y")
-        matn += f"  • {kun_fmt}: 1 ta\n"
+        matn += f"  • {kun_fmt}: {x['xato_turi']}\n"
 
     return matn
 
@@ -149,13 +168,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     matn = (
         "👋 Salom! Men xato kuzatuv botiman.\n\n"
         "📌 *Ishlash tartibi:*\n"
-        "Kanalda `#ism` yozsangiz, o'sha xodimga 1 xato qo'shiladi.\n\n"
-        "Masalan: `#aziz` → Azizga 1 xato\n\n"
+        "Kanalda xodim ismini hashtag bilan yozing:\n"
+        "`#ism -xato_kodi sana` (sana ixtiyoriy)\n\n"
+        "Masalan:\n"
+        "• `#aziz -x1` (Azizga DOGOVOR xatosi)\n"
+        "• `#olim -x3 15.04.2024` (Olimga 15-aprel uchun KONTRAGENT xatosi)\n"
+        "• `#aziz -kechikish` (Azizga ixtiyoriy xato yozish)\n\n"
+        "*Xato kodlari:*\n"
+        "x1: DOGOVOR, x2: KOMMENT, x3: KONTRAGENT, x4: NOMEKLATURA, x5: KOLICHESTVO, "
+        "x6: PRIXOD, x7: VOZVRAT, x8: SPISANIYA, x9: NAKLADNOY, x10: SUMMA\n\n"
         "*Buyruqlar:*\n"
-        "/hafta — haftalik hisobot\n"
-        "/oy — oylik hisobot\n"
-        "/bugun — bugungi hisobot\n"
-        "/stat aziz — Aziz statistikasi\n"
+        "/hafta, /oy, /bugun — hisobotlar\n"
+        "/stat ism — xodim statistikasi\n"
         "/hammasi — barcha xodimlar\n"
         "/ochir — oxirgi xatoni o'chirish"
     )
@@ -188,7 +212,7 @@ async def ochir_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await javob_yuborish(update, "O'chiriladigan yozuv yo'q.")
         return
     kun_fmt = oxirgi["sana"].strftime("%d.%m.%Y")
-    await javob_yuborish(update, f"🗑 O'chirildi:\n👤 {oxirgi['ism']} | 📅 {kun_fmt}")
+    await javob_yuborish(update, f"🗑 O'chirildi:\n👤 {oxirgi['ism']} | 📅 {kun_fmt}\n📝 Xato: {oxirgi['xato_turi']}")
 
 
 async def hammasi_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -227,30 +251,59 @@ async def xabar_qabul(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif buyruq == "start": await start(update, context)
         return
 
-    teglar = re.findall(r'#([a-zA-Z\u0400-\u04FFa-zA-Z]+)', matn)
+    # 1. Ismlarni topish (#id yoki #ism)
+    teglar = re.findall(r'#([a-zA-Z\u0400-\u04FF0-9_]+)', matn)
     if not teglar:
         return
 
-    bugun = datetime.now().date()
-    bugun_fmt = datetime.now().strftime("%d.%m.%Y")
+    # 2. Sanani topish (DD.MM.YYYY)
+    sana_match = re.search(r'(\d{1,2})\.(\d{1,2})\.(\d{4})', matn)
+    hozir = get_now()
+    if sana_match:
+        try:
+            sana = datetime.strptime(sana_match.group(0), "%d.%m.%Y").date()
+        except:
+            sana = hozir.date()
+    else:
+        sana = hozir.date()
+
+    # 3. Xato turini topish (-x1 yoki -matn)
+    xato_turi = "Umumiy xato"
+    xato_match = re.search(r'-([^\s#]+(?: [^\s#]+)*)', matn)
+    if xato_match:
+        raw_xato = xato_match.group(1).strip()
+        # Sanani xato matni ichidan olib tashlash
+        if sana_match:
+            raw_xato = raw_xato.replace(sana_match.group(0), "").strip()
+        
+        # Kodni tekshirish
+        kodlar = raw_xato.split()
+        if kodlar and kodlar[0].lower() in XATO_KODLARI:
+            xato_turi = XATO_KODLARI[kodlar[0].lower()]
+        elif raw_xato:
+            xato_turi = raw_xato
+
     qoshilganlar = []
+    sana_fmt = sana.strftime("%d.%m.%Y")
 
     for teg in teglar:
         ism = teg.capitalize()
-        await add_xato(ism, bugun)
+        await add_xato(ism, sana, xato_turi)
 
         xatolar = await get_all_xatolar()
         mine = [x for x in xatolar if x["ism"] == ism]
         
-        b_jami = sum(1 for x in mine if x["sana"] == bugun)
-        h_jami = sum(1 for x in mine if x["sana"] >= datetime.now().date() - timedelta(days=7))
-        o_jami = sum(1 for x in mine if x["sana"] >= datetime.now().date().replace(day=1))
+        # Statlarda hozirgi kun/hafta/oyni Toshkent vaqti bilan hisoblash
+        bugun_date = hozir.date()
+        b_jami = sum(1 for x in mine if x["sana"] == bugun_date)
+        h_jami = sum(1 for x in mine if x["sana"] >= bugun_date - timedelta(days=7))
+        o_jami = sum(1 for x in mine if x["sana"] >= bugun_date.replace(day=1))
 
         qoshilganlar.append(
             f"👤 *{ism}*\n"
-            f"   📅 Bugun ({bugun_fmt}): *{b_jami} ta*\n"
-            f"   📆 Bu hafta: *{h_jami} ta*\n"
-            f"   🗓 Bu oy: *{o_jami} ta*"
+            f"   📝 Xato: *{xato_turi}*\n"
+            f"   📅 Sana: *{sana_fmt}*\n"
+            f"   📊 Bugun: *{b_jami} ta* | Hafta: *{h_jami}* | Oy: *{o_jami}*"
         )
 
     javob = "✅ *Xato qayd etildi!*\n\n" + "\n\n".join(qoshilganlar)
