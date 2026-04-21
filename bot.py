@@ -15,16 +15,16 @@ load_dotenv()
 TASHKENT_TZ = pytz.timezone("Asia/Tashkent")
 
 XATO_KODLARI = {
-    "x1": "DOGOVOR",
-    "x2": "KOMMENT",
-    "x3": "KONTRAGENT",
-    "x4": "NOMEKLATURA",
-    "x5": "KOLICHESTVO",
-    "x6": "PRIXOD",
-    "x7": "VOZVRAT",
-    "x8": "SPISANIYA",
-    "x9": "NAKLADNOY",
-    "x10": "SUMMA"
+    "x1": "DOGOVOR", "dogovor": "DOGOVOR",
+    "x2": "KOMMENT", "komment": "KOMMENT", "koment": "KOMMENT",
+    "x3": "KONTRAGENT", "kontragent": "KONTRAGENT",
+    "x4": "NOMEKLATURA", "nomeklatura": "NOMEKLATURA",
+    "x5": "KOLICHESTVO", "kolichestvo": "KOLICHESTVO",
+    "x6": "PRIXOD", "prixod": "PRIXOD",
+    "x7": "VOZVRAT", "vozvrat": "VOZVRAT",
+    "x8": "SPISANIYA", "spisaniya": "SPISANIYA",
+    "x9": "NAKLADNOY", "nakladnoy": "NAKLADNOY",
+    "x10": "SUMMA", "summa": "SUMMA"
 }
 
 def get_now():
@@ -276,11 +276,16 @@ async def xabar_qabul(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if sana_match:
             raw_xato = raw_xato.replace(sana_match.group(0), "").strip()
         
-        # Kodni tekshirish
-        kodlar = raw_xato.split()
-        if kodlar and kodlar[0].lower() in XATO_KODLARI:
-            xato_turi = XATO_KODLARI[kodlar[0].lower()]
-        elif raw_xato:
+        # Kodlarni yoki nomlarni tekshirish
+        xato_matni = raw_xato.lower()
+        topildi = False
+        for k, v in XATO_KODLARI.items():
+            if xato_matni.startswith(k):
+                xato_turi = v
+                topildi = True
+                break
+        
+        if not topildi and raw_xato:
             xato_turi = raw_xato
 
     qoshilganlar = []
