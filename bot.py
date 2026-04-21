@@ -15,16 +15,16 @@ load_dotenv()
 TASHKENT_TZ = pytz.timezone("Asia/Tashkent")
 
 XATO_KODLARI = {
-    "x1": "DOGOVOR", "dogovor": "DOGOVOR",
-    "x2": "KOMMENT", "komment": "KOMMENT", "koment": "KOMMENT",
-    "x3": "KONTRAGENT", "kontragent": "KONTRAGENT",
-    "x4": "NOMEKLATURA", "nomeklatura": "NOMEKLATURA",
-    "x5": "KOLICHESTVO", "kolichestvo": "KOLICHESTVO",
-    "x6": "PRIXOD", "prixod": "PRIXOD",
-    "x7": "VOZVRAT", "vozvrat": "VOZVRAT",
-    "x8": "SPISANIYA", "spisaniya": "SPISANIYA",
-    "x9": "NAKLADNOY", "nakladnoy": "NAKLADNOY",
-    "x10": "SUMMA", "summa": "SUMMA"
+    "x1": "-DOGOVOR", "dogovor": "-DOGOVOR",
+    "x2": "-KOMMENT", "komment": "-KOMMENT", "koment": "-KOMMENT",
+    "x3": "-KONTRAGENT", "kontragent": "-KONTRAGENT",
+    "x4": "-NOMEKLATURA", "nomeklatura": "-NOMEKLATURA",
+    "x5": "-KOLICHESTVO", "kolichestvo": "-KOLICHESTVO",
+    "x6": "-PRIXOD", "prixod": "-PRIXOD",
+    "x7": "-VOZVRAT", "vozvrat": "-VOZVRAT",
+    "x8": "-SPISANIYA", "spisaniya": "-SPISANIYA",
+    "x9": "-NAKLADNOY", "nakladnoy": "-NAKLADNOY",
+    "x10": "-SUMMA", "summa": "-SUMMA"
 }
 
 def get_now():
@@ -171,12 +171,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Kanalda xodim ismini hashtag bilan yozing:\n"
         "`#ism -xato_kodi sana` (sana ixtiyoriy)\n\n"
         "Masalan:\n"
-        "• `#aziz -x1` (Azizga DOGOVOR xatosi)\n"
-        "• `#olim -x3 15.04.2024` (Olimga 15-aprel uchun KONTRAGENT xatosi)\n"
-        "• `#aziz -kechikish` (Azizga ixtiyoriy xato yozish)\n\n"
+        "• `#aziz -x1` (Azizga -DOGOVOR xatosi)\n"
+        "• `#olim -x3 15.04.2024` (Olimga 15-aprel uchun -KONTRAGENT xatosi)\n\n"
         "*Xato kodlari:*\n"
-        "x1: DOGOVOR, x2: KOMMENT, x3: KONTRAGENT, x4: NOMEKLATURA, x5: KOLICHESTVO, "
-        "x6: PRIXOD, x7: VOZVRAT, x8: SPISANIYA, x9: NAKLADNOY, x10: SUMMA\n\n"
+        "x1: -DOGOVOR, x2: -KOMMENT, x3: -KONTRAGENT, x4: -NOMEKLATURA, x5: -KOLICHESTVO, "
+        "x6: -PRIXOD, x7: -VOZVRAT, x8: -SPISANIYA, x9: -NAKLADNOY, x10: -SUMMA\n\n"
+        "⚠️ *Eslatma:* Faqat yuqoridagi 10 ta xato turi hisobga olinadi. Boshqa har qanday yozuv e'tiborsiz qoldiriladi.\n\n"
         "*Buyruqlar:*\n"
         "/hafta, /oy, /bugun — hisobotlar\n"
         "/stat ism — xodim statistikasi\n"
@@ -268,7 +268,7 @@ async def xabar_qabul(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sana = hozir.date()
 
     # 3. Xato turini topish (-x1 yoki -matn)
-    xato_turi = "Umumiy xato"
+    xato_turi = None
     xato_match = re.search(r'-([^\s#]+(?: [^\s#]+)*)', matn)
     if xato_match:
         raw_xato = xato_match.group(1).strip()
@@ -278,15 +278,14 @@ async def xabar_qabul(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Kodlarni yoki nomlarni tekshirish
         xato_matni = raw_xato.lower()
-        topildi = False
-        for k, v in XATO_KODLARI.items():
-            if xato_matni.startswith(k):
-                xato_turi = v
-                topildi = True
+        # Uzunroq kodlarni birinchi tekshirish (masalan x10 dan oldin x1 ni emas)
+        for k in sorted(XATO_KODLARI.keys(), key=len, reverse=True):
+            if xato_matni == k or xato_matni.startswith(k):
+                xato_turi = XATO_KODLARI[k]
                 break
-        
-        if not topildi and raw_xato:
-            xato_turi = raw_xato
+    
+    if not xato_turi:
+        return
 
     qoshilganlar = []
     sana_fmt = sana.strftime("%d.%m.%Y")
