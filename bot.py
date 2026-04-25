@@ -95,13 +95,16 @@ async def hisobot_yaratish(davr="hafta"):
         if datetime.combine(x["sana"] if not isinstance(x["sana"], datetime) else x["sana"].date(), datetime.min.time()).replace(tzinfo=TASHKENT_TZ) >= bosh
     ]
 
+    # Saralash:
+    filtered.sort(key=lambda x: x["sana"])
+
     if not filtered:
         return "📭 Bu davrda xato topilmadi."
 
-    stat = defaultdict(lambda: {"jami": 0, "xatolar": defaultdict(int)})
+    stat = defaultdict(lambda: {"jami": 0, "xatolar": defaultdict(list)})
     for x in filtered:
         stat[x["ism"]]["jami"] += 1
-        stat[x["ism"]]["xatolar"][x["xato_turi"]] += 1
+        stat[x["ism"]]["xatolar"][x["xato_turi"]].append(x["sana"].strftime("%d.%m"))
 
     matn = f"📊 *{nom} HISOBOT*\n"
     matn += f"📅 {bosh.strftime('%d.%m.%Y')} — {endi.strftime('%d.%m.%Y')}\n"
@@ -113,8 +116,9 @@ async def hisobot_yaratish(davr="hafta"):
         emoji = "🔴" if s["jami"] >= 5 else "🟡" if s["jami"] >= 3 else "🟢"
         ball = round(s["jami"] * 0.2, 1)
         matn += f"{emoji} *{ism}* — {s['jami']} ta xato (*{ball} ball*)\n"
-        for xato, soni in sorted(s["xatolar"].items(), key=lambda x: -x[1]):
-            matn += f"   • {xato}: {soni} ta\n"
+        for xato, sanalar in sorted(s["xatolar"].items(), key=lambda x: -len(x[1])):
+            sanalar_str = ", ".join(sanalar)
+            matn += f"   • {xato}: {len(sanalar)} ta ({sanalar_str})\n"
         matn += "\n"
 
     matn += "━━━━━━━━━━━━━━━━━━━━\n✅ Hisobot tayyor"
